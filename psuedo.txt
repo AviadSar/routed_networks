@@ -1,0 +1,34 @@
+train, test = get_data()
+train, test = annotate_extra(train, test)
+train, test = vectorize(train, test)
+
+routing_data = get_partial_data(train, 0.01)
+
+routing_model = routing_network()
+model = routed_network(routing_model)
+
+# epoch
+epoch = 0
+while True:
+    routing_epoch_wrong = 0
+    # routing epoch (mini epoch)
+    while True:
+        for routing_batch in routing_batch_generator(routing_data)
+            predictions = routing_model(routed_batch)
+            loss = criterion(routed_batch.targets, predictions)
+            routing_model.step()
+            wrong = count_wrong(routed_batch.targets, predictions)
+            routing_epoch_wrong += wrong
+        if routing_epoch_wrong == 0:
+            break
+
+    # routing network fully converged on routing data
+    epoch_wrong = 0
+    for batch in batch_generator(train):
+        predictions = model(batch)
+        loss = criterion(batch.targets, predictions)
+        model.step()
+        wrong = count_wrong(model.targets, predictions)
+        routing_epoch_wrong += wrong
+    if epoch == 200 or epoch_wrong == 0:
+        break
