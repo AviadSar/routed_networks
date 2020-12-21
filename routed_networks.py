@@ -30,7 +30,7 @@ try_n = 0
 optimizer_name = 'sgd'
 entnet_threshold = [0] * 20
 # entnet_threshold = [0, 0.1, 4.1, 0, 0.3, 0.2, 0, 0.5, 0.1, 0.6, 0.3, 0, 1.3, 0, 0, 0.2, 0.5, 0.3, 2.3, 0]
-data_dir = "./../../../babi_data/tasks_1-20_v1-2/en-valid-10k"
+data_dir = "./../babi_data/tasks_1-20_v1-2/en-valid-10k"
 STATE_PATH = './trained_models/task_{}_try_{}.pth'
 OPTIM_PATH = './trained_models/task_{}_try_{}.pth'
 cuda = True
@@ -84,19 +84,6 @@ def get_vocab(tasks):
     return vocab, len(vocab) + 1
 
 
-# def init_embedding_matrix(vocab, device):
-#     # token_to_idx = {token: torch.tensor(i+1) for i, token in enumerate(vocab)}
-#     token_to_idx = {token: i+1 for i, token in enumerate(vocab)}
-#     embeddings_matrix = nn.Embedding(len(vocab) + 1, embedding_dim, 0).to(device)
-#
-#     init_mean = torch.zeros((len(vocab) + 1, embedding_dim), device=device)
-#     init_standard_deviation = torch.cat((torch.full((1, embedding_dim), 0.0, device=device), torch.full((len(vocab), embedding_dim), 0.1, device=device)))
-#
-#     embeddings_matrix.weight = nn.Parameter(torch.normal(init_mean, init_standard_deviation), requires_grad=True).to(device)
-#
-#     return embeddings_matrix, token_to_idx
-
-
 def get_len_max_story(data):
     len_max_story = 0
     for story, query, answer in data:
@@ -133,39 +120,60 @@ def vectorize_router_data(data, len_max_sentence):
     return sentences, sentence_annotations
 
 
-def vectorize_data(data, len_max_sentence, len_max_story, annotate=True):
+def vectorize_data(data, len_max_sentence, len_max_story):
+    len_masked_sentence = len_max_sentence * 3
 
-    vec_stories = torch.zeros((len(data), len_max_story, len_max_sentence), dtype=torch.long, requires_grad=False)
+    vec_stories = torch.zeros((len(data), len_max_story, len_masked_sentence), dtype=torch.long, requires_grad=False)
     vec_queries = torch.zeros((len(data), len_max_sentence), dtype=torch.long, requires_grad=False)
     vec_answers = torch.zeros((len(data)), requires_grad=False, dtype=torch.long)
-    sentence_annotations = torch.zeros((len(data), len_max_story), dtype=torch.long, requires_grad=False)
-    query_annotations = torch.zeros((len(data)), dtype=torch.long, requires_grad=False)
 
     i = 0
     for story, query, answer in data:
-        vec_curr_story = torch.zeros((len_max_story, len_max_sentence), requires_grad=False)
+        vec_curr_story = torch.zeros((len_max_story, len_masked_sentence), requires_grad=False)
         for j, sentence in enumerate(story):
-            word_padding_size = max(0, len_max_sentence - len(sentence))
+            word_padding_size = max(0, len_masked_sentence - len(sentence))
             vec_curr_story[j] = torch.tensor(sentence + [0] * word_padding_size)
-            sentence_annotations[i, j] = annotate(sentence)
 
         sentence_padding_size = max(0, len_max_story - len(story))
         for j in range(1, sentence_padding_size + 1):
-            vec_curr_story[-j] = torch.tensor([0] * len_max_sentence)
-            sentence_annotations[i, j] = annotate(None)
+            vec_curr_story[-j] = torch.tensor([0] * len_masked_sentence)
 
         vec_stories[i] = vec_curr_story
 
         word_padding_size = max(0, len_max_sentence - len(query))
         vec_curr_query = torch.tensor(query + [0] * word_padding_size)
         vec_queries[i] = vec_curr_query
-        query_annotations[i] = annotate(query)
 
         vec_answers[i] = torch.tensor(answer)
 
         i += 1
 
-    return vec_stories, vec_queries, vec_answers, sentence_annotations, query_annotations
+    return vec_stories, vec_queries, vec_answers
+
+
+def mask_sentence(sentence, token_to_idx, len_max_sentence):
+    moves = ["journeyed", "moved", "travelled", "went", "went back"]
+    grabs = ["grabbed", "got", "took", "picked up"]
+    drops = ["discarded", "dropped", "left", "put down"]
+
+    mask = [0] * (3 * len_max_sentence)
+
+    word_padding_size = max(0, len_max_sentence - len(sentence))
+    masked_sentence = [token_to_idx[w] for w in sentence] + [0] * word_padding_size
+
+    for move in moves:
+        if move in sentence:
+            mask[0:len_max_sentence] = masked_sentence
+            return mask
+    for grab in grabs:
+        if grab in sentence:
+            mask[len_max_sentence: 2 * len_max_sentence] = masked_sentence
+            return mask
+    for drop in drops:
+        if drop in sentence:
+            mask[2 * len_max_sentence:] = masked_sentence
+            return mask
+    raise ValueError("No valid mask")
 
 
 def indexize_data(data, token_to_idx, len_max_sentence):
@@ -174,8 +182,8 @@ def indexize_data(data, token_to_idx, len_max_sentence):
     for story, query, answer in data:
         indexed_story = []
         for sentence in story:
-            word_padding_size = max(0, len_max_sentence - len(sentence))
-            indexed_story.append([token_to_idx[w] for w in sentence] + [0] * word_padding_size)
+            masked_sentence = mask_sentence(sentence, token_to_idx, len_max_sentence)
+            indexed_story.append(masked_sentence)
 
 
         word_padding_size = max(0, len_max_sentence - len(query))
@@ -255,6 +263,63 @@ def network_batch_generator(data, len_max_sentence, batch_size, permute='full'):
             return
 
 
+def init_embedding_matrix(vocab_size, device):
+    embeddings_matrix = nn.Embedding(vocab_size, embedding_dim, 0).to(device)
+
+    init_mean = torch.zeros((vocab_size, embedding_dim), device=device)
+    init_standard_deviation = torch.cat((torch.full((1, embedding_dim), 0.0, device=device), torch.full((vocab_size - 1, embedding_dim), 0.1, device=device)))
+
+    embeddings_matrix.weight = nn.Parameter(torch.normal(init_mean, init_standard_deviation), requires_grad=True).to(device)
+
+    return embeddings_matrix
+
+
+def get_key_tensors(n_routes, device):
+    """
+    returns a list of key tensors with length n_memories
+    list may be randomly initialized (current version) or tied to specific entities
+    """
+    mean = torch.zeros((n_routes, embedding_dim), device=device)
+    standard_deviation = torch.full((n_routes, embedding_dim), 0.1, device=device)
+    keys = torch.normal(mean, standard_deviation)
+
+    return nn.Parameter(keys, requires_grad=True).to(device)
+
+
+def get_initial_state(device):
+    """
+    returns a list of key tensors with length n_memories
+    list may be randomly initialized (current version) or tied to specific entities
+    """
+    mean = torch.zeros(embedding_dim, device=device)
+    standard_deviation = torch.full([embedding_dim], 0.1, device=device)
+    state = torch.normal(mean, standard_deviation)
+
+    return nn.Parameter(state, requires_grad=True).to(device)
+
+
+def get_matrix_weights(out_scale, in_scale, device):
+    """
+    :return: initial weights for any og the matrices U, V, W
+     weights may be randomly initialized (current version) or initialized to zeros or the identity matrix
+    """
+    init_mean = torch.zeros((embedding_dim * out_scale, embedding_dim * in_scale), device=device)
+    init_standard_deviation = torch.full((embedding_dim * out_scale, embedding_dim * in_scale), 0.1, device=device)
+
+    return nn.Parameter(torch.normal(init_mean, init_standard_deviation), requires_grad=True).to(device)
+
+
+def get_r_matrix_weights(vocab_size, device):
+    """
+    :return: initial weights for any og the matrices U, V, W
+     weights may be randomly initialized (current version) or initialized to zeros or the identity matrix
+    """
+    init_mean = torch.zeros((vocab_size, embedding_dim), device=device)
+    init_standard_deviation = torch.full((vocab_size, embedding_dim), 0.1, device=device)
+
+    return nn.Parameter(torch.normal(init_mean, init_standard_deviation), requires_grad=True).to(device)
+
+
 def get_non_linearity():
     """
     :return: the non-linearity function to be used in the model.
@@ -264,124 +329,105 @@ def get_non_linearity():
     return nn.PReLU(init=1)
 
 
-# # batch training
-# class routed_network(nn.Module):
-#     def __init__(self, vocab_size, keys, len_max_sentence, embeddings_matrix, device):
-#         super(EntNet, self).__init__()
-#         self.len_max_sentence = len_max_sentence
-#         self.device = device
-#
-#         #embedding
-#         self.embedding_matrix = embeddings_matrix
-#
-#         # Encoder
-#         self.input_encoder_multiplier = nn.Parameter(torch.ones((len_max_sentence, embedding_dim), device=device), requires_grad=True).to(device)
-#         # self.query_encoder_multiplier = nn.Parameter(torch.ones((len_max_sentence, embedding_dim), device=device), requires_grad=True).to(device)
-#         self.query_encoder_multiplier = self.input_encoder_multiplier
-#
-#         # Memory
-#         self.keys = keys
-#         self.embedded_keys = self.keys
-#         if learn_keys:
-#             self.embedded_keys = nn.Parameter(self.embedded_keys, requires_grad=True)
-#         self.memories = None
-#
-#         # self.gates = nn.Parameter(torch.zeros(n_memories), requires_grad=True)
-#
-#         self.U = nn.Linear(embedding_dim, embedding_dim, bias=False).to(device)
-#         self.V = nn.Linear(embedding_dim, embedding_dim, bias=False).to(device)
-#         self.W = nn.Linear(embedding_dim, embedding_dim, bias=False).to(device)
-#         # self.U.weight = nn.Parameter(get_matrix_weights(device), requires_grad=True).to(device)
-#         # self.V.weight = nn.Parameter(get_matrix_weights(device), requires_grad=True).to(device)
-#         # self.W.weight = nn.Parameter(get_matrix_weights(device), requires_grad=True).to(device)
-#         self.U.weight = get_matrix_weights(device)
-#         self.V.weight = get_matrix_weights(device)
-#         self.W.weight = get_matrix_weights(device)
-#
-#         self.in_non_linearity = get_non_linearity().to(device)
-#         # self.query_non_linearity = get_non_linearity().to(device)
-#         self.query_non_linearity = self.in_non_linearity
-#
-#         # Decoder
-#         # self.R = nn.Linear(vocab_size, embedding_dim, bias=False).to(device)
-#         self.R = nn.Linear(embedding_dim, vocab_size, bias=False).to(device)
-#         self.H = nn.Linear(embedding_dim, embedding_dim, bias=False).to(device)
-#         # self.R.weight = nn.Parameter(get_r_matrix_weights(vocab_size, device), requires_grad=True).to(device)
-#         # self.H.weight = nn.Parameter(get_matrix_weights(device), requires_grad=True).to(device)
-#         self.R.weight = get_r_matrix_weights(vocab_size, device)
-#         self.H.weight = get_matrix_weights(device)
-#
-#     def init_new_memories(self, keys, device, batch_size):
-#         # self.memories = torch.tensor(keys, requires_grad=True, device=device).repeat(batch_size, 1, 1)
-#         self.memories = keys.clone().detach().to(device).repeat(batch_size, 1, 1)
-#
-#     def forward(self, batch):
-#
-#         batch = self.embedding_matrix(batch)
-#         if (not learn_keys) and tie_keys:
-#             self.embedded_keys = nn.Parameter(self.embedding_matrix(self.keys))
-#
-#         # re-initialize memories to key-values
-#         self.init_new_memories(self.embedded_keys, self.device, len(batch))
-#
-#         # Encoder
-#         batch = batch * self.input_encoder_multiplier
-#         batch = batch.sum(dim=2)
-#
-#         # Memory
-#         for sentence_idx in range(batch.shape[1]):
-#             sentence = batch[:, sentence_idx]
-#             sentence_memory_repeat = sentence.repeat(1, n_memories).view(len(batch), n_memories, -1)
-#
-#             memory_gate = (sentence * self.memories.permute(1, 0, 2)).permute(1, 0, 2).sum(dim=2)
-#             key_gate = (sentence_memory_repeat * self.embedded_keys).sum(dim=2)
-#             gate = torch.sigmoid(memory_gate + key_gate)
-#
-#             update_candidate = self.in_non_linearity(self.U(self.memories) + self.V(self.embedded_keys) + self.W(sentence_memory_repeat))
-#             # the null sentence mask make sure the padding sentences (that are not part of the original story, but are fake "null" sentences) doesn't effect the memories of th network
-#             null_sentence_mask = gate.clone().detach()
-#             null_sentence_mask[null_sentence_mask == 0.5] = 0
-#             null_sentence_mask[null_sentence_mask != 0] = 1
-#             # self.memories = self.memories + (update_candidate.permute(2, 0, 1) * gate).permute(1, 2, 0)
-#             self.memories = self.memories + (update_candidate.permute(2, 0, 1) * gate * null_sentence_mask).permute(1, 2, 0)
-#             self.memories = (self.memories.permute(2, 0, 1) / torch.norm(self.memories, dim=2)).permute(1, 2, 0)
-#
-#     def decode(self, batch):
-#
-#         batch = self.embedding_matrix(batch)
-#         # Decoder
-#         # query = query.to(device)
-#         batch = batch * self.query_encoder_multiplier
-#         batch = batch.sum(dim=1)
-#         answers_probabilities = F.softmax((batch * self.memories.permute(1, 0, 2)).sum(dim=2).t(), dim=0)
-#         scores = (self.memories.permute(2, 0, 1) * answers_probabilities).permute(1, 2, 0).sum(dim=1)
-#         results = self.R(self.query_non_linearity(batch + self.H(scores)))
-#         return results
-
 class Router(nn.Module):
     def __init__(self, vocab_size, len_max_sentence, n_routes, device):
         super().__init__()
-        pass
+        self.proxy = nn.Parameter(torch.zeros(1))
 
     def forward(self, batch):
         pass
 
+
 class RoutedNetwork(nn.Module):
+    #     def __init__(self, vocab_size, keys, len_max_sentence, embeddings_matrix, device):
     def __init__(self, vocab_size, len_max_sentence, n_routes, device):
         super().__init__()
         self.router = Router(vocab_size, len_max_sentence, n_routes, device)
 
-    def create_route_mask(self, route_logits):
-        pass
+        self.len_max_sentence = len_max_sentence
+        self.device = device
+        self.n_routes = n_routes
 
-    def sentences_from_stories(self, stories):
-        pass
+        #embedding
+        self.embedding_matrix = init_embedding_matrix(vocab_size, device)
+
+        # Encoder
+        self.input_encoder_multiplier = nn.Parameter(torch.ones((len_max_sentence * n_routes, embedding_dim), device=device), requires_grad=True).to(device)
+        self.query_encoder_multiplier = nn.Parameter(torch.ones((len_max_sentence, embedding_dim), device=device), requires_grad=True).to(device)
+        # self.query_encoder_multiplier = self.input_encoder_multiplier
+
+        # Memory
+        self.keys = get_key_tensors(n_routes, device)
+        self.initial_state = get_initial_state(device)
+        self.state = None
+
+        self.U = nn.Linear(embedding_dim * n_routes, embedding_dim, bias=False).to(device)
+        self.V = nn.Linear(embedding_dim * n_routes, embedding_dim * n_routes, bias=False).to(device)
+        self.W = nn.Linear(embedding_dim * n_routes, embedding_dim * n_routes, bias=False).to(device)
+
+        self.U.weight = get_matrix_weights(n_routes, 1, device)
+        self.V.weight = get_matrix_weights(n_routes, n_routes, device)
+        self.W.weight = get_matrix_weights(n_routes, n_routes, device)
+
+        self.in_non_linearity = get_non_linearity().to(device)
+        self.query_non_linearity = get_non_linearity().to(device)
+        # self.query_non_linearity = self.in_non_linearity
+
+        # Decoder
+        self.R = nn.Linear(embedding_dim, vocab_size, bias=False).to(device)
+        self.H = nn.Linear(embedding_dim, embedding_dim, bias=False).to(device)
+        self.R.weight = get_r_matrix_weights(vocab_size, device)
+        self.H.weight = get_matrix_weights(1, 1, device)
+
+    # def create_route_mask(self, route_logits):
+    #     pass
+    #
+    # def sentences_from_stories(self, stories):
+    #     pass
+
+    def init_new_state(self, batch_size, device):
+        # self.state = self.initial_state.clone().detach().to(device).repeat(batch_size, 1, 1)
+        self.state = (self.initial_state * 1).repeat(batch_size, 1, 1)
 
     def forward(self, batch_stories, batch_queries):
 
-        sentences = self.sentences_from_stories(batch_stories)
-        route_logits = self.router(sentences)
-        route_mask = self.create_route_mask(route_logits)
+        batch = self.embedding_matrix(batch_stories)
+
+        # re-initialize memories to key-values
+        self.init_new_state(len(batch), self.device)
+
+        # Encoder
+        a, b, c, d = batch.shape
+        batch = (batch * self.input_encoder_multiplier).reshape(a, b, self.n_routes, c // self.n_routes, d)
+        batch = batch.sum(dim=3)
+
+        # Memory
+        for sentence_idx in range(batch.shape[1]):
+            sentence = batch[:, sentence_idx]
+            # sentence_memory_repeat = sentence.repeat(1, n_memories).view(len(batch), n_memories, -1)
+
+            # state_gate = (sentence * self.state).sum(dim=2)
+            # key_gate = (sentence * self.keys).sum(dim=2)
+            state_gate = sentence * self.state
+            key_gate = sentence * self.keys
+            gate = torch.sigmoid(state_gate + key_gate)
+
+            original = sentence.shape
+            update_candidate = self.in_non_linearity(self.U(self.state).reshape(original) + self.V(self.keys.reshape(-1)).reshape(self.keys.shape) + self.W(sentence.reshape(a, -1)).reshape(original))
+            # the null sentence mask make sure the padding sentences (that are not part of the original story, but are fake "null" sentences) doesn't effect the memories of th network
+            null_sentence_mask = gate.clone().detach()
+            null_sentence_mask[null_sentence_mask == 0.5] = 0
+            null_sentence_mask[null_sentence_mask != 0] = 1
+            # self.memories = self.memories + (update_candidate.permute(2, 0, 1) * gate).permute(1, 2, 0)
+            self.state = self.state + (update_candidate * (gate * null_sentence_mask)).sum(dim=1, keepdim=True)
+            self.state = self.state / torch.norm(self.state, dim=1, keepdim=True)
+
+        # Decoder
+        batch = self.embedding_matrix(batch_queries)
+        batch = batch * self.query_encoder_multiplier
+        batch = batch.sum(dim=1, keepdim=True)
+        results = self.R(self.query_non_linearity(batch + self.H(self.state))).reshape(batch.shape[0], -1)
+        return results, None
 
 
 def train_router(router_vec_train, len_max_sentence, device, routed_network, criterion, router_optimizer):
@@ -420,10 +466,11 @@ def train_router(router_vec_train, len_max_sentence, device, routed_network, cri
         if router_correct_epoch == len(router_vec_train) or router_epoch == 200:
             break
 
-def train_nework(vec_train, vec_test, len_max_sentence, permute_data, epoch, task_id, train_acc_history,
-                 train_loss_history, test_acc_history, full_test_loss_history, net_history, optim_history, loss_history,
-                 test_loss_history, correct_history, test_correct_history, learning_rate,
-                 device, routed_network, network_optimizer, criterion, router_optimizer):
+
+def train_network(vec_train, vec_test, len_max_sentence, permute_data, epoch, task_id, train_acc_history,
+                  train_loss_history, test_acc_history, full_test_loss_history, net_history, optim_history, loss_history,
+                  test_loss_history, correct_history, test_correct_history, learning_rate,
+                  device, routed_network, network_optimizer, criterion, router_optimizer):
     epoch_loss = 0.0
     running_loss = 0.0
     correct_batch = 0
@@ -435,18 +482,17 @@ def train_nework(vec_train, vec_test, len_max_sentence, permute_data, epoch, tas
         print("len vec train is: {}".format(len(vec_train)))
         print("len vec test is: {}".format(len(vec_test)))
     for i, batch in enumerate(network_batch_generator(vec_train, len_max_sentence, batch_size, permute_data)):
-        batch_stories, batch_queries, batch_answers, story_annotations, query_annotations = batch
+        batch_stories, batch_queries, batch_answers = batch
 
-        batch_stories, batch_queries, batch_answers, story_annotations, query_annotations = \
+        batch_stories, batch_queries, batch_answers = \
             batch_stories.clone().detach().to(device), batch_queries.clone().detach().to(device), \
-            batch_answers.clone().detach().to(device), story_annotations.clone().detach().to(device), \
-            query_annotations.clone().detach().to(device)
+            batch_answers.clone().detach().to(device)
 
         network_output, router_output = routed_network(batch_stories, batch_queries)
-        network_loss, router_loss = criterion(network_output, batch_answers), criterion(router_output,
-                                                                                        story_annotations)
+        network_loss = criterion(network_output, batch_answers)
+        # router_loss = criterion(router_output, story_annotations)
         network_loss.backward()
-        router_loss.backwards()
+        # router_loss.backwards()
 
         running_loss += network_loss.item()
         epoch_loss += network_loss.item()
@@ -454,8 +500,8 @@ def train_nework(vec_train, vec_test, len_max_sentence, permute_data, epoch, tas
         nn.utils.clip_grad_value_(routed_network.parameters(), gradient_clip_value)
         network_optimizer.step()
         network_optimizer.zero_grad()
-        router_optimizer.step()
-        router_optimizer.zero_grad()
+        # router_optimizer.step()
+        # router_optimizer.zero_grad()
 
         pred_idx = np.argmax(network_output.cpu().detach().numpy(), axis=1)
         for j in range(len(network_output)):
@@ -511,15 +557,6 @@ def train_nework(vec_train, vec_test, len_max_sentence, permute_data, epoch, tas
     correct_history.append(correct_epoch)
     test_correct_history.append(test_correct)
 
-    # adjust learning rate every 25 epochs until 200 epochs
-    if epoch < 200 and epoch % 25 == 24:
-        learning_rate = learning_rate / 2
-        network_optimizer = optim.SGD(routed_network.parameters(), lr=learning_rate)
-        router_optimizer = optim.SGD(routed_network.router.parameters(), lr=learning_rate)
-        if optimizer_name == 'adam':
-            network_optimizer = optim.Adam(routed_network.parameters(), lr=learning_rate)
-            router_optimizer = optim.Adam(routed_network.router.parameters(), lr=learning_rate)
-
 
 def train(tasks, vocab_tasks, device, mix=False, task_id=None):
     train, test = list(), list()
@@ -538,24 +575,15 @@ def train(tasks, vocab_tasks, device, mix=False, task_id=None):
 
     print_start_train_message(task_id)
 
-    model_score = np.inf
-    model_test_score = np.inf
-    model_correct_score = 0
-    model_test_correct_score = 0
-
     token_to_idx = {token: i + 1 for i, token in enumerate(vocab)}
 
     vec_train = indexize_data(train, token_to_idx, len_max_sentence)
     vec_test = indexize_data(test, token_to_idx, len_max_sentence)
-    router_vec_train = get_router_data(vec_train)
+    # router_vec_train = get_router_data(vec_train)
 
-
-    # entnet = EntNet(vocab_size, keys, len_max_sentence, embeddings_matrix, device)
-    # entnet.to(device)
-    # entnet = entnet.float()
     # entnet.load_state_dict(torch.load(STATE_PATH.format(task, 0)))
     ########################################################################
-    routed_network = RoutedNetwork()
+    routed_network = RoutedNetwork(vocab_size, len_max_sentence, 3, device)
     routed_network.to(device)
     routed_network = routed_network.float()
 
@@ -566,7 +594,7 @@ def train(tasks, vocab_tasks, device, mix=False, task_id=None):
     router_optimizer = optim.SGD(routed_network.router.parameters(), lr=learning_rate)
     if optimizer_name == 'adam':
         network_optimizer = optim.Adam(routed_network.parameters(), lr=learning_rate)
-        router_optimizer = optim.Adam(routed_network.router.parameters(), lr=learning_rate)
+        # router_optimizer = optim.Adam(routed_network.router.parameters(), lr=learning_rate)
     # optimizer.load_state_dict(torch.load(OPTIM_PATH.format(task, 0)))
 
     ##### Train Model #####
@@ -582,12 +610,12 @@ def train(tasks, vocab_tasks, device, mix=False, task_id=None):
 
     while True:
 
-        train_router(router_vec_train, len_max_sentence, device, routed_network, criterion, router_optimizer)
+        # train_router(router_vec_train, len_max_sentence, device, routed_network, criterion, router_optimizer)
 
-        train_nework(vec_train, vec_test, len_max_sentence, permute_data, epoch, task_id, train_acc_history,
-                     train_loss_history, test_acc_history, full_test_loss_history, net_history, optim_history,
-                     loss_history, test_loss_history, correct_history, test_correct_history, learning_rate,
-                     device, routed_network, network_optimizer, criterion, router_optimizer)
+        train_network(vec_train, vec_test, len_max_sentence, permute_data, epoch, task_id, train_acc_history,
+                      train_loss_history, test_acc_history, full_test_loss_history, net_history, optim_history,
+                      loss_history, test_loss_history, correct_history, test_correct_history, learning_rate,
+                      device, routed_network, network_optimizer, criterion, router_optimizer)
         epoch += 1
 
         if epoch == 200:
@@ -599,6 +627,15 @@ def train(tasks, vocab_tasks, device, mix=False, task_id=None):
             model_correct_score = correct_history[best_idx]
             model_test_correct_score = test_correct_history[best_idx]
             break
+
+            # adjust learning rate every 25 epochs until 200 epochs
+        if epoch < 200 and epoch % 25 == 24:
+            learning_rate = learning_rate / 2
+            network_optimizer = optim.SGD(routed_network.parameters(), lr=learning_rate)
+            router_optimizer = optim.SGD(routed_network.router.parameters(), lr=learning_rate)
+            if optimizer_name == 'adam':
+                network_optimizer = optim.Adam(routed_network.parameters(), lr=learning_rate)
+                router_optimizer = optim.Adam(routed_network.router.parameters(), lr=learning_rate)
 
 
     torch.save(best_model, STATE_PATH.format(task_id, try_n))
@@ -620,15 +657,15 @@ def eval(task_is, device, routed_network, vec_test, len_max_sentence):
         running_loss = 0
         correct = 0
         for i, batch in enumerate(network_batch_generator(vec_test, len_max_sentence, batch_size, permute='no')):
-            batch_stories, batch_queries, batch_answers, story_annotations, query_annotations = batch
+            batch_stories, batch_queries, batch_answers = batch
 
-            batch_stories, batch_queries, batch_answers, story_annotations, query_annotations = \
+            batch_stories, batch_queries, batch_answers = \
                 batch_stories.clone().detach().to(device), batch_queries.clone().detach().to(device), \
-                batch_answers.clone().detach().to(device), story_annotations.clone().detach().to(device), \
-                query_annotations.clone().detach().to(device)
+                batch_answers.clone().detach().to(device)
 
             network_output, router_output = routed_network(batch_stories, batch_queries)
-            network_loss, router_loss = criterion(network_output, batch_answers), criterion(router_output, story_annotations)
+            network_loss = criterion(network_output, batch_answers)
+            # router_loss = criterion(router_output, story_annotations)
 
             running_loss += network_loss.item()
 
@@ -665,7 +702,7 @@ def test(tasks, vocab_tasks, device, mix=False, task_id=None):
     token_to_idx = {token: i + 1 for i, token in enumerate(vocab)}
     vec_test = indexize_data(test, token_to_idx, len_max_sentence)
 
-    routed_network = RoutedNetwork()
+    routed_network = RoutedNetwork(vocab_size, len_max_sentence, 3, device)
     routed_network.to(device)
     routed_network = routed_network.float()
     routed_network.load_state_dict(torch.load(STATE_PATH.format(task_id, try_n)))
@@ -775,7 +812,7 @@ def main():
     embedding_dim = args.embedding_dim
     batch_size = args.batch_size
     gradient_clip_value = args.gradient_clip_value
-    optimizer = args.optimizer_name
+    optimizer = args.optimizer
     train_tasks = args.train_tasks
     test_tasks = args.test_tasks
     STATE_PATH = args.state_path
